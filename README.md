@@ -1,4 +1,4 @@
-# Adjustable-MA
+# Adjustable MA
 
 **Warning! This expert advisor is not profitable! Use it only a demo account!**
 
