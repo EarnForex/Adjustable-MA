@@ -1,12 +1,19 @@
 ﻿//+------------------------------------------------------------------+
 //|                                        Adjustable Moving Average |
-//|                             Copyright © 2009-2022, EarnForex.com |
+//|                             Copyright © 2009-2025, EarnForex.com |
 //|                                       https://www.earnforex.com/ |
 //+------------------------------------------------------------------+
-#property copyright "Copyright © 2009-2022, EarnForex"
+#property copyright "Copyright © 2009-2025, EarnForex"
 #property link      "https://www.earnforex.com/metatrader-expert-advisors/Adjustable-MA/"
-#property version   "1.06"
+#property version   "1.07"
 #property strict
+
+enum ENUM_TRADE_DIRECTION
+{
+    TRADE_DIRECTION_LONG, // Long-only
+    TRADE_DIRECTION_SHORT, // Short-only
+    TRADE_DIRECTION_BOTH // Both
+};
 
 input group "Main"
 input int Period_1 = 20;
@@ -16,6 +23,11 @@ input int MinDiff = 3; // MinDiff: Minimum difference between MAs for a Cross to
 input int StopLoss = 0;
 input int TakeProfit = 0;
 input int TrailingStop = 0;
+input ENUM_TRADE_DIRECTION TradeDirection = TRADE_DIRECTION_BOTH;
+input string StartTime = "00:00"; // Start time (Server), inclusive
+input string EndTime =   "23:59"; // End time (Server), inclusive
+input bool CloseTradesOutsideTradingTime = true;
+input bool DoTrailingOutsideTradingTime = true;
 input group "Money management"
 input double Lots = 0.1;
 input bool UseMM = false;
@@ -34,6 +46,7 @@ int LastBars = 0;
 int PrevCross = 0;
 
 int Magic;
+bool CanTrade = false;
 
 ENUM_SYMBOL_TRADE_EXECUTION Execution_Mode;
 
@@ -74,7 +87,9 @@ void OnTick()
         return;
     }
 
-    if (TrailingStop > 0) DoTrailing();
+    CanTrade = CheckTime();
+
+    if ((TrailingStop > 0) && ((CanTrade) || (DoTrailingOutsideTradingTime))) DoTrailing();
 
     // Wait for the new Bar in a chart.
     if (LastBars == Bars) return;
@@ -105,8 +120,8 @@ void CheckCross()
     {
         if ((SMA_Current - FMA_Current) >= MinDiff * Poin) // Became bearish.
         {
-            ClosePrev();
-            fSell();
+            if ((CanTrade) || (CloseTradesOutsideTradingTime)) ClosePrev();
+            if ((CanTrade) && (TradeDirection != TRADE_DIRECTION_LONG)) fSell();
             PrevCross = -1;
         }
     }
@@ -114,8 +129,8 @@ void CheckCross()
     {
         if ((FMA_Current - SMA_Current) >= MinDiff * Poin) // Became bullish.
         {
-            ClosePrev();
-            fBuy();
+            if ((CanTrade) || (CloseTradesOutsideTradingTime)) ClosePrev();
+            if ((CanTrade) && (TradeDirection != TRADE_DIRECTION_SHORT)) fBuy();
             PrevCross = 1;
         }
     }
@@ -162,44 +177,46 @@ void ClosePrev()
 int fSell()
 {
     double SL = 0, TP = 0;
-    RefreshRates();
 
-    if (Execution_Mode != SYMBOL_TRADE_EXECUTION_MARKET)
+    for (int i = 0; i < 10; i++)
     {
-        if (StopLoss > 0) SL = Bid + StopLoss * Poin;
-        if (TakeProfit > 0) TP = Bid - TakeProfit * Poin;
-    }
-    int result = OrderSend(Symbol(), OP_SELL, LotsOptimized(), Bid, Deviation, SL, TP, OrderCommentary, Magic);
-
-    if (result == -1)
-    {
-        int e = GetLastError();
-        Print(e);
-    }
-    else
-    {
-        if (Execution_Mode == SYMBOL_TRADE_EXECUTION_MARKET)
+        RefreshRates();
+        if (Execution_Mode != SYMBOL_TRADE_EXECUTION_MARKET)
         {
-            RefreshRates();
-            if (!OrderSelect(result, SELECT_BY_TICKET))
+            if (StopLoss > 0) SL = Bid + StopLoss * Poin;
+            if (TakeProfit > 0) TP = Bid - TakeProfit * Poin;
+        }
+        int result = OrderSend(Symbol(), OP_SELL, LotsOptimized(), Bid, Deviation, SL, TP, OrderCommentary, Magic);
+    
+        if (result == -1)
+        {
+            int e = GetLastError();
+            Print("OrderSend error: ", e);
+        }
+        else
+        {
+            if (Execution_Mode == SYMBOL_TRADE_EXECUTION_MARKET)
             {
-                Print("Failed to select an order #", result, " for post-open SL/TP application, error: ", GetLastError());
-                return -1;
-            }
-            if (StopLoss > 0) SL = OrderOpenPrice() + StopLoss * Poin;
-            if (TakeProfit > 0) TP = OrderOpenPrice() - TakeProfit * Poin;
-            if ((SL != 0) || (TP != 0))
-            {
-                if (!OrderModify(result, OrderOpenPrice(), SL, TP, 0))
+                RefreshRates();
+                if (!OrderSelect(result, SELECT_BY_TICKET))
                 {
-                    Print("Failed to modify an order #", result, " (applying post-open SL/TP), error: ", GetLastError());
+                    Print("Failed to select an order #", result, " for post-open SL/TP application, error: ", GetLastError());
                     return -1;
                 }
+                if (StopLoss > 0) SL = OrderOpenPrice() + StopLoss * Poin;
+                if (TakeProfit > 0) TP = OrderOpenPrice() - TakeProfit * Poin;
+                if ((SL != 0) || (TP != 0))
+                {
+                    if (!OrderModify(result, OrderOpenPrice(), SL, TP, 0))
+                    {
+                        Print("Failed to modify an order #", result, " (applying post-open SL/TP), error: ", GetLastError());
+                        return -1;
+                    }
+                }
             }
+            return result;
         }
-        return result;
     }
-
     return -1;
 }
 
@@ -209,44 +226,46 @@ int fSell()
 int fBuy()
 {
     double SL = 0, TP = 0;
-    RefreshRates();
 
-    if (Execution_Mode != SYMBOL_TRADE_EXECUTION_MARKET)
+    for (int i = 0; i < 10; i++)
     {
-        if (StopLoss > 0) SL = Ask - StopLoss * Poin;
-        if (TakeProfit > 0) TP = Ask + TakeProfit * Poin;
-    }
-    int result = OrderSend(Symbol(), OP_BUY, LotsOptimized(), Ask, Deviation, SL, TP, OrderCommentary, Magic);
-
-    if (result == -1)
-    {
-        int e = GetLastError();
-        Print(e);
-    }
-    else
-    {
-        if (Execution_Mode == SYMBOL_TRADE_EXECUTION_MARKET)
+        RefreshRates();
+        if (Execution_Mode != SYMBOL_TRADE_EXECUTION_MARKET)
         {
-            RefreshRates();
-            if (!OrderSelect(result, SELECT_BY_TICKET))
+            if (StopLoss > 0) SL = Ask - StopLoss * Poin;
+            if (TakeProfit > 0) TP = Ask + TakeProfit * Poin;
+        }
+        int result = OrderSend(Symbol(), OP_BUY, LotsOptimized(), Ask, Deviation, SL, TP, OrderCommentary, Magic);
+    
+        if (result == -1)
+        {
+            int e = GetLastError();
+            Print("OrderSend error: ", e);
+        }
+        else
+        {
+            if (Execution_Mode == SYMBOL_TRADE_EXECUTION_MARKET)
             {
-                Print("Failed to select an order #", result, " for post-open SL/TP application, error: ", GetLastError());
-                return -1;
-            }
-            if (StopLoss > 0) SL = OrderOpenPrice() - StopLoss * Poin;
-            if (TakeProfit > 0) TP = OrderOpenPrice() + TakeProfit * Poin;
-            if ((SL != 0) || (TP != 0))
-            {
-                if (!OrderModify(result, OrderOpenPrice(), SL, TP, 0))
+                RefreshRates();
+                if (!OrderSelect(result, SELECT_BY_TICKET))
                 {
-                    Print("Failed to modify an order #", result, " (applying post-open SL/TP), error: ", GetLastError());
+                    Print("Failed to select an order #", result, " for post-open SL/TP application, error: ", GetLastError());
                     return -1;
                 }
+                if (StopLoss > 0) SL = OrderOpenPrice() - StopLoss * Poin;
+                if (TakeProfit > 0) TP = OrderOpenPrice() + TakeProfit * Poin;
+                if ((SL != 0) || (TP != 0))
+                {
+                    if (!OrderModify(result, OrderOpenPrice(), SL, TP, 0))
+                    {
+                        Print("Failed to modify an order #", result, " (applying post-open SL/TP), error: ", GetLastError());
+                        return -1;
+                    }
+                }
             }
+            return result;
         }
-        return result;
     }
-
     return -1;
 }
 
@@ -265,7 +284,7 @@ void DoTrailing()
                 if (Bid - OrderOpenPrice() >= TrailingStop * Poin)
                 {
                     // If the current stop-loss is below the desired trailing stop level.
-                    if (OrderStopLoss() < (Bid - TrailingStop * Poin))
+                    if ((Bid - TrailingStop * Poin) - OrderStopLoss() > Point() / 2) // Double-safe comparison.
                         if (!OrderModify(OrderTicket(), OrderOpenPrice(), Bid - TrailingStop * Poin, OrderTakeProfit(), 0))
                             Print("Failed to modify an order #", OrderTicket(), " (trailing stop), error: ", GetLastError());
                 }
@@ -277,7 +296,7 @@ void DoTrailing()
                 if (OrderOpenPrice() - Ask >= TrailingStop * Poin)
                 {
                     // If the current stop-loss is below the desired trailing stop level.
-                    if ((OrderStopLoss() > (Ask + TrailingStop * Poin)) || (OrderStopLoss() == 0))
+                    if ((OrderStopLoss() - (Ask + TrailingStop * Poin) > Point() / 2) || (OrderStopLoss() == 0)) // Double-safe comparison.
                         if (!OrderModify(OrderTicket(), OrderOpenPrice(), Ask + TrailingStop * Poin, OrderTakeProfit(), 0))
                             Print("Failed to modify an order #", OrderTicket(), " (trailing stop), error: ", GetLastError());
                 }
@@ -292,5 +311,14 @@ double LotsOptimized()
     double vol = NormalizeDouble((AccountFreeMargin() / 10000) * LotsPer10000, 1);
     if (vol <= 0) return Lots;
     return vol;
+}
+
+bool CheckTime()
+{
+    if ((TimeCurrent() >= StringToTime(StartTime)) && (TimeCurrent() <= StringToTime(EndTime) + 59)) // Using +59 seconds to make the minute time inclusive.
+    {
+        return true;
+    }
+    return false;
 }
 //+------------------------------------------------------------------+

@@ -1,17 +1,24 @@
 ﻿//+------------------------------------------------------------------+
 //|                                        Adjustable Moving Average |
-//|                             Copyright © 2009-2022, EarnForex.com |
+//|                             Copyright © 2009-2025, EarnForex.com |
 //|                                       https://www.earnforex.com/ |
 //+------------------------------------------------------------------+
-#property copyright "Copyright © 2009-2022, EarnForex"
+#property copyright "Copyright © 2009-2025, EarnForex"
 #property link      "https://www.earnforex.com/metatrader-expert-advisors/Adjustable-MA/"
-#property version   "1.06"
+#property version   "1.07"
 
 #property description "Adjustable MA EA - expert advisor for customizable MA trading."
 #property description "Modify StopLoss, TakeProfit, TrailingStop, MA Period, MA Type"
 #property description "and minimum difference between MAs to count as cross."
 
 #include <Trade/Trade.mqh>
+
+enum ENUM_TRADE_DIRECTION
+{
+    TRADE_DIRECTION_LONG, // Long-only
+    TRADE_DIRECTION_SHORT, // Short-only
+    TRADE_DIRECTION_BOTH // Both
+};
 
 input group "Main"
 input int Period_1 = 20;
@@ -21,6 +28,11 @@ input int MinDiff = 3; // MinDiff: Minimum difference between MAs for a Cross to
 input int StopLoss = 0;
 input int TakeProfit = 0;
 input int TrailingStop = 0;
+input ENUM_TRADE_DIRECTION TradeDirection = TRADE_DIRECTION_BOTH;
+input string StartTime = "00:00"; // Start time (Server), inclusive
+input string EndTime =   "23:59"; // End time (Server), inclusive
+input bool CloseTradesOutsideTradingTime = true;
+input bool DoTrailingOutsideTradingTime = true;
 input group "Money management"
 input double Lots = 0.1;
 input bool UseMM = false;
@@ -42,6 +54,7 @@ int LastBars = 0;
 int PrevCross = 0;
 
 int Magic; // Will work only in hedging mode.
+bool CanTrade = false;
 
 ENUM_SYMBOL_TRADE_EXECUTION Execution_Mode;
 
@@ -90,13 +103,16 @@ void OnTick()
 {
     Execution_Mode = (ENUM_SYMBOL_TRADE_EXECUTION)SymbolInfoInteger(Symbol(), SYMBOL_TRADE_EXEMODE);
     if (Execution_Mode == SYMBOL_TRADE_EXECUTION_MARKET) DoSLTP(); // ECN mode - set SL and TP.
-    if (TrailingStop > 0) DoTrailing();
+
+    CanTrade = CheckTime();
+
+    if ((TrailingStop > 0) && ((CanTrade) || (DoTrailingOutsideTradingTime))) DoTrailing();
 
     // Wait for the new Bar in a chart.
     if (LastBars == Bars(_Symbol, _Period)) return;
     else LastBars = Bars(_Symbol, _Period);
 
-    if ((Bars(_Symbol, _Period) < SlowMA) || (MQL5InfoInteger(MQL5_TRADE_ALLOWED) == false)) return;
+    if ((Bars(_Symbol, _Period) < SlowMA) || (MQLInfoInteger(MQL_TRADE_ALLOWED) == false)) return;
 
     CheckCross();
 }
@@ -124,8 +140,8 @@ void CheckCross()
     {
         if ((SMA_Current - FMA_Current) >= MinDiff * Poin) // Became bearish.
         {
-            ClosePrev();
-            fSell();
+            if ((CanTrade) || (CloseTradesOutsideTradingTime)) ClosePrev();
+            if ((CanTrade) && (TradeDirection != TRADE_DIRECTION_LONG)) fSell();
             PrevCross = -1;
         }
     }
@@ -133,8 +149,8 @@ void CheckCross()
     {
         if ((FMA_Current - SMA_Current) >= MinDiff * Poin) // Became bullish.
         {
-            ClosePrev();
-            fBuy();
+            if ((CanTrade) || (CloseTradesOutsideTradingTime)) ClosePrev();
+            if ((CanTrade) && (TradeDirection != TRADE_DIRECTION_SHORT)) fBuy();
             PrevCross = 1;
         }
     }
@@ -162,7 +178,11 @@ void ClosePrev()
             Print("Trading disabled in symbol: " + PositionGetString(POSITION_SYMBOL) + ".");
             continue;
         }
-        Trade.PositionClose(ticket);
+        for (int j = 0; j < 10; j++)
+        {
+            if (Trade.PositionClose(ticket)) break;
+            else Print("Failed to close position #", ticket, ", error: ", GetLastError());
+        }
     }
 }
 
@@ -188,7 +208,14 @@ void fSell()
         TP = 0;
     }
 
-    Trade.Sell(LotsOptimized(), Symbol(), NormalizeDouble(SymbolInfoDouble(Symbol(), SYMBOL_BID), _Digits), SL, TP, OrderCommentary);
+    for (int i = 0; i < 10; i++)
+    {
+        if (!Trade.Sell(LotsOptimized(), Symbol(), NormalizeDouble(SymbolInfoDouble(Symbol(), SYMBOL_BID), _Digits), SL, TP, OrderCommentary))
+        {
+            Print("Error sending order: " + Trade.ResultRetcodeDescription() + ".");
+        }
+        else break;
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -213,7 +240,14 @@ void fBuy()
         TP = 0;
     }
 
-    Trade.Buy(LotsOptimized(), Symbol(), NormalizeDouble(SymbolInfoDouble(Symbol(), SYMBOL_ASK), _Digits), SL, TP, OrderCommentary);
+    for (int i = 0; i < 10; i++)
+    {
+        if (!Trade.Buy(LotsOptimized(), Symbol(), NormalizeDouble(SymbolInfoDouble(Symbol(), SYMBOL_ASK), _Digits), SL, TP, OrderCommentary))
+        {
+            Print("Error sending order: " + Trade.ResultRetcodeDescription() + ".");
+        }
+        else break;
+    }
 }
 
 void DoTrailing()
@@ -242,7 +276,7 @@ void DoTrailing()
             // If profit is greater or equal to the desired Trailing Stop value.
             if (SymbolInfoDouble(Symbol(), SYMBOL_BID) - PositionGetDouble(POSITION_PRICE_OPEN) >= TrailingStop * Poin)
             {
-                if (PositionGetDouble(POSITION_SL) < (SymbolInfoDouble(Symbol(), SYMBOL_BID) - TrailingStop * Poin))
+                if ((SymbolInfoDouble(Symbol(), SYMBOL_BID) - TrailingStop * Poin) - PositionGetDouble(POSITION_SL) > Point() / 2) // Double-safe comparison.
                 {
                     double SL = NormalizeDouble(SymbolInfoDouble(Symbol(), SYMBOL_BID) - TrailingStop * Poin, _Digits);
                     double TP = PositionGetDouble(POSITION_TP);
@@ -256,7 +290,7 @@ void DoTrailing()
             // If profit is greater or equal to the desired Trailing Stop value.
             if (PositionGetDouble(POSITION_PRICE_OPEN) - SymbolInfoDouble(Symbol(), SYMBOL_ASK) >= TrailingStop * Poin)
             {
-                if (PositionGetDouble(POSITION_SL) > (SymbolInfoDouble(Symbol(), SYMBOL_ASK) + TrailingStop * Poin))
+                if ((PositionGetDouble(POSITION_SL) - (SymbolInfoDouble(Symbol(), SYMBOL_ASK) + TrailingStop * Poin) > Point() / 2) || (PositionGetDouble(POSITION_SL) == 0)) // Double-safe comparison.
                 {
                     double SL = NormalizeDouble(SymbolInfoDouble(Symbol(), SYMBOL_ASK) + TrailingStop * Poin, _Digits);
                     double TP = PositionGetDouble(POSITION_TP);
@@ -315,5 +349,14 @@ void DoSLTP()
             Trade.PositionModify(_Symbol, SL, TP);
         }
     }
+}
+
+bool CheckTime()
+{
+    if ((TimeCurrent() >= StringToTime(StartTime)) && (TimeCurrent() <= StringToTime(EndTime) + 59)) // Using +59 seconds to make the minute time inclusive.
+    {
+        return true;
+    }
+    return false;
 }
 //+------------------------------------------------------------------+
